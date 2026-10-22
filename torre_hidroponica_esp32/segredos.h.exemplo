@@ -1,0 +1,15 @@
+// Copie este arquivo para "segredos.h" (mesma pasta) e preencha.
+// O segredos.h está no .gitignore: senha nenhuma vai para o GitHub.
+//
+// Hoje todas as torres usam a mesma credencial do HiveMQ (plano
+// Serverless). No plano Starter, cada torre ganha a sua, com usuário =
+// id da torre, e uma regra "aerotower/${mqtt-username}/#" impede que uma
+// torre leia ou escreva na caixa de outra.
+#pragma once
+
+#define MQTT_USUARIO "coloque-o-usuario-da-torre"
+#define MQTT_SENHA   "coloque-a-senha-da-torre"
+
+// Senha da rede Wi-Fi que a torre cria para ser configurada
+// ("AeroTower-XXXX"). Mínimo 8 caracteres. Vai impressa no manual.
+#define SENHA_PORTAL_WIFI "aerotower"
