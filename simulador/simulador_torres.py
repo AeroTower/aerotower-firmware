@@ -21,7 +21,9 @@ import argparse
 import json
 import os
 import random
+import re
 import ssl
+import sys
 import time
 
 import paho.mqtt.client as mqtt
@@ -30,6 +32,11 @@ BROKER  = os.getenv("MQTT_BROKER", "47d5de0ce14d4654a95021e273720719.s1.eu.hivem
 PORTA   = int(os.getenv("MQTT_PORT", "8883"))
 PREFIXO = os.getenv("MQTT_PREFIXO", "aerotower")
 USAR_TLS = os.getenv("MQTT_TLS", "true").lower() != "false"   # false so p/ broker local
+ID_VALIDO = re.compile(r"^AT-[0-9A-Z]{4,16}$")   # mesma regra do Backend
+ERROS_CONEXAO = {
+    1: "versao do protocolo recusada", 2: "client id recusado", 3: "broker indisponivel",
+    4: "usuario ou senha errados (confira MQTT_USER e MQTT_PASS)", 5: "nao autorizado (confira MQTT_USER e MQTT_PASS)",
+}
 SENSORES_POR_KIT = {"basico": [], "completo": ["nivel"], "pro": ["nivel", "ph", "tds", "clima"]}
 
 
@@ -49,13 +56,24 @@ class TorreSimulada:
             self.cliente.tls_set(cert_reqs=ssl.CERT_REQUIRED)
         self.cliente.will_set(f"{self.base}/status", json.dumps({"status": "offline"}), qos=1, retain=True)
         self.cliente.on_connect = self._conectou
+        self.cliente.on_disconnect = self._caiu
+        self.conectada = False
         self.cliente.on_message = self._comando
 
     def iniciar(self):
         self.cliente.connect(BROKER, PORTA, 30)
         self.cliente.loop_start()
 
-    def _conectou(self, cliente, *_):
+    def _caiu(self, *_):
+        if self.conectada:
+            print(f"[{self.id}] desconectado do broker, tentando de novo...")
+        self.conectada = False
+
+    def _conectou(self, cliente, userdata, flags, rc, *_):
+        if rc != 0:
+            print(f"[{self.id}] ERRO ao conectar no broker: {ERROS_CONEXAO.get(rc, rc)}")
+            return
+        self.conectada = True
         print(f"[{self.id}] conectado")
         cliente.publish(f"{self.base}/status", json.dumps({"status": "online"}), qos=1, retain=True)
         cliente.publish(f"{self.base}/info", json.dumps({
@@ -86,6 +104,9 @@ class TorreSimulada:
         return max(minimo, min(maximo, valor))
 
     def publicar(self):
+        if not self.conectada:
+            print(f"[{self.id}] sem conexao com o broker: nada foi enviado")
+            return
         if self.ciclo and time.time() - self.mudou > (self.lig if self.motor else self.des) * 60:
             self.motor, self.mudou = not self.motor, time.time()
             self._status_motor()
@@ -122,7 +143,13 @@ def main():
     torres = []
     for item in args.torre:
         torre_id, _, kit = item.partition(":")
-        torres.append(TorreSimulada(torre_id.upper(), kit or "pro"))
+        torre_id, kit = torre_id.strip().upper(), (kit or "pro").strip().lower()
+        if not ID_VALIDO.match(torre_id):
+            sys.exit(f"Id invalido: {torre_id!r}. Use AT- seguido de 4 a 16 letras/numeros "
+                     "(ex.: AT-DEMO0001); o Backend ignora qualquer outro formato.")
+        if kit not in SENSORES_POR_KIT:
+            sys.exit(f"Kit invalido: {kit!r}. Use: {', '.join(SENSORES_POR_KIT)} (sem acento).")
+        torres.append(TorreSimulada(torre_id, kit))
     for torre in torres:
         torre.iniciar()
 
