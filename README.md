@@ -1,4 +1,4 @@
-# Firmware da torre AeroTower (v2)
+# Firmware da torre AeroTower (v2.1)
 
 ## Gravar uma placa
 
@@ -24,7 +24,9 @@ internet no futuro, use a partição "Minimal SPIFFS").
 |---|---|
 | Primeira vez ligada | Cria a rede `AeroTower-XXXX` (senha em `segredos.h`). O celular conecta e escolhe o Wi-Fi da casa. |
 | Botão BOOT por 5 s | Esquece o Wi-Fi e reabre a rede de configuração. |
-| Sem internet | A bomba continua no ciclo. Leituras não são enviadas. |
+| Sem internet | A bomba continua no ciclo. Leituras aparecem só no monitor serial. |
+| Wi-Fi salvo não conecta por 3 min | Reabre a rede `AeroTower-XXXX` por 5 min; se ninguém configurar, volta a tentar a rede salva. |
+| Sensor desconectado ou com defeito | Depois de 3 leituras ruins, publica `null` para ele e o tira da lista `sensores` do tópico `info`. Testa de novo a cada 30 s e volta sozinho. |
 | Queda de energia | Volta no último ciclo configurado pelo app. |
 | Caiu sem avisar | O broker publica `{"status":"offline"}` no lugar dela (LWT). |
 
@@ -35,10 +37,22 @@ aerotower/<id>/sensores        torre -> servidor, a cada 5 s
 aerotower/<id>/motor/comando   servidor -> torre  {"acao":"ciclo","minutos_ligado":15,"minutos_desligado":45} | {"acao":"desligar"}
 aerotower/<id>/motor/status    torre -> servidor, retido
 aerotower/<id>/status          {"status":"online"|"offline"}, retido
-aerotower/<id>/info            {"firmware","kit","sensores":[...],"ip","rssi"}, retido
+aerotower/<id>/info            {"firmware","kit","sensores":[...],"ausentes":[...],"ip","rssi"}, retido
 ```
 
 `<id>` = `AT-` + MAC da placa (aparece no monitor serial como `TORRE_ID=`).
+
+## Como a torre decide que um sensor está desconectado
+
+| Sensor | Considerado ausente quando |
+|---|---|
+| Nível (ultrassônico) | Nenhum eco em 3 medições seguidas |
+| Clima (SHT3x) | Não responde no I2C |
+| pH | Pino oscilando demais (solto) ou pH fora de 1 a 13 (módulo solto puxa o pino para 0 V) |
+| TDS | Pino oscilando demais, tensão quase 0 V (sonda fora da água) ou acima de 1500 ppm |
+
+Os limites ficam em `config.h`. Se um sensor ligado for marcado como
+ausente, aumente `ADC_VARIACAO_MAX`.
 
 ## Pendências conhecidas
 

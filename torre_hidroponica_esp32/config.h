@@ -6,7 +6,7 @@
 // torres daquele kit.
 #pragma once
 
-#define FIRMWARE_VERSAO "2.0.0"
+#define FIRMWARE_VERSAO "2.1.0"
 
 // ── Kit ───────────────────────────────────
 #define KIT_BASICO   1   // bomba com ciclos
@@ -53,6 +53,29 @@
 
 // ── Publicação ────────────────────────────
 #define PUBLISH_INTERVAL_MS 5000
+
+// ── Wi-Fi e broker ────────────────────────
+// Com Wi-Fi salvo que não conecta, a torre reabre a rede "AeroTower-XXXX"
+// depois de WIFI_PORTAL_APOS_MS. Se ninguém configurar em
+// WIFI_PORTAL_DURACAO_S, o portal fecha e ela tenta a rede salva de novo.
+#define WIFI_PORTAL_APOS_MS   180000UL   // 3 min
+#define WIFI_PORTAL_DURACAO_S 300        // 5 min
+#define MQTT_RETENTATIVA_MS   10000UL
+#define MQTT_TIMEOUT_S        5          // espera máxima por resposta do broker
+
+// ── Sensores desconectados ────────────────
+// Leituras ruins seguidas até o sensor ser dado como ausente (publica null).
+#define SENSOR_FALHAS_PARA_AUSENTE 3
+// Sensor ausente é testado de novo a cada:
+#define SENSOR_RETESTE_MS          30000UL
+// Pino analógico solto oscila muito. Se (máx - mín) das últimas 30
+// amostras passar disso (escala 0-4095), pH/TDS são tratados como soltos.
+// Se um sensor ligado for marcado como ausente, aumente este valor.
+#define ADC_VARIACAO_MAX 400
+#define PH_MIN_VALIDO    1.0
+#define PH_MAX_VALIDO    13.0
+#define TDS_MAX_VALIDO   1500.0   // ppm; o sensor mede até ~1000
+#define TDS_V_MIN        0.02     // V; abaixo disso a sonda está fora da água
 
 // ── Calibração pH ─────────────────────────
 #define PH_CAL_V7 2.64

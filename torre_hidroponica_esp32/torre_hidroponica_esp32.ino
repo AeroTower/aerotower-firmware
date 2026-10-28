@@ -1,23 +1,25 @@
 // ============================================
-// ESP32 - Torre AeroTower  v2 (várias torres)
+// ESP32 - Torre AeroTower  v2.1
 // ============================================
-// O que mudou em relação à v1:
-//  * id da torre = "AT-" + MAC da placa (ex.: AT-24DCC3A1B2C4). O mesmo
-//    firmware serve para qualquer torre, sem recompilar.
-//  * cada torre tem a sua "caixa" no broker:
-//      aerotower/<id>/sensores        (publica a cada 5 s)
-//      aerotower/<id>/motor/comando   (assina)
-//      aerotower/<id>/motor/status    (publica, retido)
-//      aerotower/<id>/status          (online; o broker publica offline sozinho)
-//      aerotower/<id>/info            (firmware, kit e sensores, retido)
-//  * client ID do MQTT = id da torre. Na v1 todas usavam "esp32-hidroponia"
-//    e uma derrubava a outra do broker.
-//  * kit escolhido em config.h: sensor que o kit não tem não é lido nem
-//    publicado.
-//  * Wi-Fi configurado pelo celular (portal "AeroTower-XXXX"), sem senha
-//    no código. Segure o botão BOOT por 5 s para trocar de rede.
-//  * a bomba segue o ciclo mesmo sem internet, e o último ciclo fica salvo
-//    para voltar depois de uma queda de energia.
+// O que a v2.1 acrescenta à v2:
+//  * Sensor desconectado não trava nem manda lixo. Cada sensor do kit é
+//    verificado a cada leitura: se não responder (ou mandar valores
+//    impossíveis), a torre publica null para ele, avisa no monitor serial
+//    e tira ele da lista "sensores" do tópico info. Quando o sensor volta,
+//    ele reaparece sozinho, sem reiniciar a placa.
+//  * Wi-Fi que não conecta abre o portal sozinho. Se a rede salva sumir
+//    (roteador trocado, senha mudada), depois de 3 min a torre cria de
+//    novo a rede "AeroTower-XXXX" para ser reconfigurada. O portal fecha
+//    após 5 min sem uso e a torre volta a tentar a rede salva.
+//  * Tempo máximo de espera do broker MQTT, para a bomba nunca ficar
+//    presa esperando a internet.
+//
+// Continua da v2:
+//  * id da torre = "AT-" + MAC da placa; tópicos aerotower/<id>/...
+//  * kit escolhido em config.h (básico, completo ou pro)
+//  * Wi-Fi configurado pelo celular; BOOT por 5 s apaga o Wi-Fi salvo
+//  * a bomba segue o ciclo sem internet e volta no último ciclo após
+//    queda de energia
 //
 // Bibliotecas (Gerenciador de Bibliotecas da Arduino IDE):
 //   PubSubClient (Nick O'Leary), ArduinoJson 6.x, WiFiManager (tzapu) 2.0.x,
@@ -45,6 +47,7 @@
 
 // ── Identidade e tópicos (montados no boot) ──
 String torreId;
+String redePortal;
 String topicoSensores, topicoComando, topicoMotorStatus, topicoStatus, topicoInfo;
 
 WiFiManager      wm;
@@ -59,22 +62,71 @@ unsigned long minutosCicloLigado = CICLO_PADRAO_LIGADO_MIN;
 unsigned long minutosCicloDeslig = CICLO_PADRAO_DESLIGADO_MIN;
 unsigned long motorMudouEm       = 0;
 
-// ── Sensores ──────────────────────────────
+// =============================================
+// Presença dos sensores
+// =============================================
+// Um sensor só é dado como "ausente" depois de SENSOR_FALHAS_PARA_AUSENTE
+// leituras ruins seguidas (um eco perdido não some com o card do app) e
+// volta a "presente" na primeira leitura boa.
+struct Sensor {
+  const char*   nome;      // como aparece no tópico info
+  const char*   rotulo;    // como aparece no monitor serial
+  bool          presente;
+  uint8_t       falhas;
+  bool          jaTestado;
+  unsigned long ultimoTeste;
+};
+
+bool infoPendente = false;   // republica o tópico info quando algo muda
+
+void registrarLeitura(Sensor& s, bool ok) {
+  s.jaTestado   = true;
+  s.ultimoTeste = millis();
+  if (ok) {
+    s.falhas = 0;
+    if (!s.presente) {
+      s.presente   = true;
+      infoPendente = true;
+      Serial.printf("✅ %s conectado\n", s.rotulo);
+    }
+  } else if (s.presente || s.falhas < SENSOR_FALHAS_PARA_AUSENTE) {
+    if (++s.falhas >= SENSOR_FALHAS_PARA_AUSENTE && s.presente) {
+      s.presente   = false;
+      infoPendente = true;
+      Serial.printf("⚠ %s sem resposta: publicando null até ele voltar\n", s.rotulo);
+    }
+  }
+}
+
+// Sensor ausente é testado de novo a cada SENSOR_RETESTE_MS, não a cada 5 s,
+// para não gastar tempo esperando um eco ou um I2C que não existe.
+bool deveTestar(const Sensor& s) {
+  if (s.presente || !s.jaTestado || s.falhas < SENSOR_FALHAS_PARA_AUSENTE) return true;
+  return millis() - s.ultimoTeste >= SENSOR_RETESTE_MS;
+}
+
+// ── Clima (SHT3x) ─────────────────────────
 float temperature = 25.0;   // também corrige o som (nível) e o TDS
 float humidity    = 0.0;
-bool  shtOk       = false;
 
 #if TEM_PRO
+Sensor sClima = {"clima", "SHT3x (temperatura/umidade)", false, 0, false, 0};
+Sensor sPh    = {"ph",    "Sensor de pH",                false, 0, false, 0};
+Sensor sTds   = {"tds",   "Sensor TDS",                  false, 0, false, 0};
+
 #define VREF    3.3
 #define ADC_RES 4096.0
 #define SCOUNT  30
 int   analogBufferTDS[SCOUNT], analogBufferPH[SCOUNT], bufferTemp[SCOUNT];
 int   analogBufferIndex = 0;
 float tdsValue = 0, phValue = 0;
+bool  shtIniciado = false;
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 #endif
 
 #if TEM_NIVEL
+Sensor sNivel = {"nivel", "Sensor de nível (ultrassônico)", false, 0, false, 0};
+
 #define ECHO_TIMEOUT_US 30000UL
 #define N_LEITURAS_US   5
 #define PAUSA_US_MS     30
@@ -82,7 +134,6 @@ Adafruit_SHT31 sht31 = Adafruit_SHT31();
 #define TANQUE_BAIXO    35
 #define TANQUE_CHEIO    90
 float tanqueDistanciaCm = -1, tanqueNivelCm = 0, tanqueLitros = 0, tanquePercentual = 0;
-bool  tanqueOk = false;
 #endif
 
 void publishMotorStatus();
@@ -197,10 +248,12 @@ float volumeAteLitros(float h) {
   return PI * h / 3.0 * (r1 * r1 + r1 * r2 + r2 * r2) / 1000.0;
 }
 
-void lerTanque() {
-  float dist = medirDistanciaCm(shtOk ? temperature : 25.0);
-  if (dist < 0) { tanqueOk = false; tanqueDistanciaCm = -1; return; }
-  tanqueOk          = true;
+void lerTanque(float tempAr) {
+  if (!deveTestar(sNivel)) return;
+  float dist = medirDistanciaCm(tempAr);
+  bool ok = dist > 0;   // -1 = nenhum eco (sensor solto ou sem alimentação)
+  registrarLeitura(sNivel, ok);
+  if (!ok) return;
   tanqueDistanciaCm = dist;
   tanqueNivelCm     = constrain(DIST_SENSOR_FUNDO_CM - dist, 0.0, ALTURA_MAX_AGUA_CM);
   tanqueLitros      = volumeAteLitros(tanqueNivelCm);
@@ -219,13 +272,16 @@ const char* classificarTanque(float pct) {
 // pH, TDS e clima (kit Pro)
 // =============================================
 #if TEM_PRO
-int mediana(int origem[], int n) {
+// Mediana e variação (máximo - mínimo) das últimas SCOUNT amostras.
+// Pino analógico solto "flutua" e varia muito; sensor ligado varia pouco.
+int mediana(int origem[], int n, int* variacao) {
   for (int i = 0; i < n; i++) bufferTemp[i] = origem[i];
   for (int j = 0; j < n - 1; j++)
     for (int i = 0; i < n - j - 1; i++)
       if (bufferTemp[i] > bufferTemp[i + 1]) {
         int t = bufferTemp[i]; bufferTemp[i] = bufferTemp[i + 1]; bufferTemp[i + 1] = t;
       }
+  *variacao = bufferTemp[n - 1] - bufferTemp[0];
   return (n & 1) ? bufferTemp[(n - 1) / 2] : (bufferTemp[n / 2] + bufferTemp[n / 2 - 1]) / 2;
 }
 
@@ -239,19 +295,39 @@ void amostrarAnalogicos() {
 }
 
 void calcularPhTds() {
-  float v = mediana(analogBufferTDS, SCOUNT) * VREF / ADC_RES;
+  int varTds, varPh;
+
+  float v = mediana(analogBufferTDS, SCOUNT, &varTds) * VREF / ADC_RES;
   float comp = v / (1.0 + 0.02 * (temperature - 25.0));
   tdsValue = (133.42 * comp * comp * comp - 255.86 * comp * comp + 857.39 * comp) * 0.5;
+  // Quase 0 V = sonda fora da água ou placa solta (solução nutritiva
+  // nunca dá 0 ppm); variação alta = pino solto; acima do máximo = lixo.
+  registrarLeitura(sTds, varTds <= ADC_VARIACAO_MAX && v >= TDS_V_MIN &&
+                         tdsValue <= TDS_MAX_VALIDO);
 
-  float vPh = mediana(analogBufferPH, SCOUNT) * VREF / ADC_RES;
+  float vPh = mediana(analogBufferPH, SCOUNT, &varPh) * VREF / ADC_RES;
   float slope = (4.0 - 7.0) / (PH_CAL_V4 - PH_CAL_V7);
   phValue = 7.0 + slope * (vPh - PH_CAL_V7);
+  // Módulo solto com o divisor ligado puxa o pino para 0 V, o que dá
+  // um pH impossível (> 14); pino totalmente solto varia demais.
+  registrarLeitura(sPh, varPh <= ADC_VARIACAO_MAX &&
+                        phValue >= PH_MIN_VALIDO && phValue <= PH_MAX_VALIDO);
 }
 
 void lerSHT3x() {
-  float t = sht31.readTemperature(), h = sht31.readHumidity();
-  shtOk = !isnan(t) && !isnan(h);
-  if (shtOk) { temperature = t; humidity = h; }
+  if (!deveTestar(sClima)) return;
+  if (!shtIniciado) shtIniciado = sht31.begin(0x44);
+  bool ok = false;
+  if (shtIniciado) {
+    float t = sht31.readTemperature(), h = sht31.readHumidity();
+    ok = !isnan(t) && !isnan(h);
+    if (ok) { temperature = t; humidity = h; }
+  }
+  registrarLeitura(sClima, ok);
+  if (!sClima.presente) {
+    shtIniciado = false;     // tenta o begin() de novo no próximo teste
+    temperature = 25.0;      // compensações voltam ao padrão
+  }
 }
 
 const char* classificarNutriente(float tds) {
@@ -264,7 +340,6 @@ const char* classificarNutriente(float tds) {
 }
 
 const char* classificarPH(float ph) {
-  if (ph < 0 || ph > 14) return "leitura_invalida";
   if (ph < 5.5)  return "muito_acido";
   if (ph < 6.0)  return "acido";
   if (ph < 6.5)  return "levemente_acido";
@@ -282,6 +357,16 @@ const char* classificarAmbiente(float temp, float hum) {
   return hum < 40.0 ? "seco" : "umido";
 }
 #endif
+
+void lerSensores() {
+#if TEM_PRO
+  lerSHT3x();
+  calcularPhTds();
+#endif
+#if TEM_NIVEL
+  lerTanque(temperature);
+#endif
+}
 
 // =============================================
 // Publicações
@@ -304,44 +389,63 @@ void publishMotorStatus() {
   mqttClient.publish(topicoMotorStatus.c_str(), payload, true);
 }
 
+// "sensores" lista só o que está respondendo agora; "ausentes", o que o
+// kit deveria ter mas não respondeu. O app usa isso para esconder cards.
 void publishInfo() {
-  StaticJsonDocument<256> doc;
+  if (!mqttClient.connected()) return;
+  StaticJsonDocument<384> doc;
   doc["firmware"] = FIRMWARE_VERSAO;
   doc["kit"]      = KIT_NOME;
-  JsonArray sensores = doc.createNestedArray("sensores");
+  JsonArray presentes = doc.createNestedArray("sensores");
+  JsonArray ausentes  = doc.createNestedArray("ausentes");
 #if TEM_NIVEL
-  sensores.add("nivel");
+  (sNivel.presente ? presentes : ausentes).add(sNivel.nome);
 #endif
 #if TEM_PRO
-  sensores.add("ph");
-  sensores.add("tds");
-  if (shtOk) sensores.add("clima");   // só se o SHT3x respondeu no boot
+  (sPh.presente    ? presentes : ausentes).add(sPh.nome);
+  (sTds.presente   ? presentes : ausentes).add(sTds.nome);
+  (sClima.presente ? presentes : ausentes).add(sClima.nome);
 #endif
   doc["ip"]   = WiFi.localIP().toString();
   doc["rssi"] = WiFi.RSSI();
-  char payload[256];
+  char payload[384];
   serializeJson(doc, payload, sizeof(payload));
-  mqttClient.publish(topicoInfo.c_str(), payload, true);
+  if (mqttClient.publish(topicoInfo.c_str(), payload, true)) infoPendente = false;
 }
 
 void publishSensores() {
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<640> doc;
 
 #if TEM_PRO
-  if (shtOk) {
+  if (sClima.presente) {
     doc["temperaturaAmbiente"] = serialized(String(temperature, 1));
     doc["umidadeRelativa"]     = serialized(String(humidity, 1));
     doc["ambiente"]            = classificarAmbiente(temperature, humidity);
+  } else {
+    doc["temperaturaAmbiente"] = nullptr;
+    doc["umidadeRelativa"]     = nullptr;
+    doc["ambiente"]            = "sensor_falhou";
   }
-  doc["ph"]         = serialized(String(phValue, 2));
-  doc["ph_status"]  = classificarPH(phValue);
-  doc["tds"]        = round(tdsValue);
-  doc["ec"]         = serialized(String(tdsValue / 500.0, 2));   // mS/cm
-  doc["tds_status"] = classificarNutriente(tdsValue);
+  if (sPh.presente) {
+    doc["ph"]        = serialized(String(phValue, 2));
+    doc["ph_status"] = classificarPH(phValue);
+  } else {
+    doc["ph"]        = nullptr;
+    doc["ph_status"] = "sensor_falhou";
+  }
+  if (sTds.presente) {
+    doc["tds"]        = round(tdsValue);
+    doc["ec"]         = serialized(String(tdsValue / 500.0, 2));   // mS/cm
+    doc["tds_status"] = classificarNutriente(tdsValue);
+  } else {
+    doc["tds"]        = nullptr;
+    doc["ec"]         = nullptr;
+    doc["tds_status"] = "sensor_falhou";
+  }
 #endif
 
 #if TEM_NIVEL
-  if (tanqueOk) {
+  if (sNivel.presente) {
     doc["nivelAgua"]           = serialized(String(tanquePercentual, 1));
     doc["tanque_litros"]       = serialized(String(tanqueLitros, 2));
     doc["tanque_nivel_cm"]     = serialized(String(tanqueNivelCm, 1));
@@ -357,10 +461,27 @@ void publishSensores() {
   doc["ciclo_ativo"] = cicloAtivo;
   doc["rssi"]        = WiFi.RSSI();
 
-  char payload[512];
+  char payload[640];
   serializeJson(doc, payload, sizeof(payload));
   mqttClient.publish(topicoSensores.c_str(), payload);
   Serial.printf("✔ [%s] %s\n", topicoSensores.c_str(), payload);
+}
+
+// Resumo no monitor serial quando a torre está sem internet, para dar
+// para testar os sensores só com o cabo USB.
+void imprimirLeiturasOffline() {
+  Serial.print("📟 (sem internet) ");
+#if TEM_PRO
+  if (sPh.presente)    Serial.printf("pH %.2f | ", phValue);          else Serial.print("pH -- | ");
+  if (sTds.presente)   Serial.printf("TDS %.0f ppm | ", tdsValue);    else Serial.print("TDS -- | ");
+  if (sClima.presente) Serial.printf("%.1f°C %.0f%% | ", temperature, humidity);
+  else                 Serial.print("clima -- | ");
+#endif
+#if TEM_NIVEL
+  if (sNivel.presente) Serial.printf("tanque %.0f%% (%.1f cm) | ", tanquePercentual, tanqueDistanciaCm);
+  else                 Serial.print("tanque -- | ");
+#endif
+  Serial.printf("bomba %s\n", motorLigado ? "ON" : "off");
 }
 
 // =============================================
@@ -387,8 +508,17 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 // =============================================
-// Conectividade (nada aqui trava o loop: a bomba não pode esperar o Wi-Fi)
+// Wi-Fi (nada aqui trava o loop: a bomba não pode esperar a internet)
 // =============================================
+void abrirPortal(bool comTempoLimite) {
+  // Com Wi-Fi salvo, o portal fecha sozinho se ninguém usar, e a torre
+  // volta a tentar a rede salva (o roteador pode só ter reiniciado).
+  wm.setConfigPortalTimeout(comTempoLimite ? WIFI_PORTAL_DURACAO_S : 0);
+  Serial.printf("📶 Portal aberto: conecte o celular na rede \"%s\" (senha %s) "
+                "e abra 192.168.4.1\n", redePortal.c_str(), SENHA_PORTAL_WIFI);
+  wm.startConfigPortal(redePortal.c_str(), SENHA_PORTAL_WIFI);
+}
+
 void iniciarWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
@@ -396,13 +526,45 @@ void iniciarWiFi() {
   wm.setTitle("AeroTower");
 
   if (wm.getWiFiIsSaved()) {
-    Serial.println("Wi-Fi salvo encontrado, conectando...");
+    Serial.println("📶 Wi-Fi salvo encontrado, conectando...");
     WiFi.begin();
   } else {
-    String rede = "AeroTower-" + torreId.substring(torreId.length() - 4);
-    Serial.printf("Sem Wi-Fi salvo. Conecte o celular na rede \"%s\" (senha %s)\n",
-                  rede.c_str(), SENHA_PORTAL_WIFI);
-    wm.startConfigPortal(rede.c_str(), SENHA_PORTAL_WIFI);
+    Serial.println("📶 Nenhum Wi-Fi salvo ainda.");
+    abrirPortal(false);
+  }
+}
+
+void manterWiFi() {
+  static unsigned long semWifiDesde   = 0;
+  static bool          estavaOnline   = false;
+  static bool          portalEstavaOn = false;
+
+  bool online = WiFi.status() == WL_CONNECTED;
+  bool portal = wm.getConfigPortalActive();
+
+  if (online != estavaOnline) {
+    estavaOnline = online;
+    if (online) Serial.printf("📶 Wi-Fi conectado: %s (IP %s, sinal %d dBm)\n",
+                              WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    else        Serial.println("📶 Wi-Fi caiu. A bomba continua no ciclo.");
+  }
+
+  // Portal fechou sem ninguém configurar: volta a tentar a rede salva.
+  if (portalEstavaOn && !portal && !online && wm.getWiFiIsSaved()) {
+    Serial.println("📶 Portal fechado, tentando a rede salva de novo...");
+    WiFi.mode(WIFI_STA);
+    WiFi.begin();
+    semWifiDesde = millis();
+  }
+  portalEstavaOn = portal;
+
+  if (online || portal) { semWifiDesde = 0; return; }
+  if (semWifiDesde == 0) { semWifiDesde = millis(); return; }
+
+  if (millis() - semWifiDesde >= WIFI_PORTAL_APOS_MS) {
+    Serial.println("📶 Não consegui entrar na rede salva.");
+    abrirPortal(true);
+    semWifiDesde = 0;
   }
 }
 
@@ -421,19 +583,24 @@ void verificarBotaoResetWiFi() {
   }
 }
 
+// =============================================
+// MQTT
+// =============================================
 void manterMQTT() {
   static unsigned long ultimaTentativa = 0;
   if (WiFi.status() != WL_CONNECTED || mqttClient.connected()) return;
-  if (ultimaTentativa != 0 && millis() - ultimaTentativa < 5000) return;
+  if (ultimaTentativa != 0 && millis() - ultimaTentativa < MQTT_RETENTATIVA_MS) return;
   ultimaTentativa = millis();
 
-  Serial.print("Conectando ao broker... ");
+  Serial.print("☁ Conectando ao broker... ");
   // Testamento (LWT): se a torre sumir sem avisar, o broker publica
   // "offline" no lugar dela.
   bool ok = mqttClient.connect(torreId.c_str(), MQTT_USUARIO, MQTT_SENHA,
                                topicoStatus.c_str(), 1, true, "{\"status\":\"offline\"}");
   if (!ok) {
-    Serial.printf("falhou (estado %d)\n", mqttClient.state());
+    int st = mqttClient.state();
+    Serial.printf("falhou (estado %d%s)\n", st,
+                  st == 4 || st == 5 ? ": confira usuário e senha em segredos.h" : "");
     return;
   }
   Serial.println("ok");
@@ -454,7 +621,8 @@ void setup() {
   digitalWrite(RELE_PIN, LOW);
   pinMode(BOTAO_PIN, INPUT_PULLUP);
 
-  torreId = lerTorreId();
+  torreId    = lerTorreId();
+  redePortal = "AeroTower-" + torreId.substring(torreId.length() - 4);
   montarTopicos();
 
   Serial.println("\n==========================================");
@@ -474,8 +642,28 @@ void setup() {
   pinMode(TDS_PIN, INPUT);
   pinMode(PH_PIN, INPUT);
   Wire.begin(SDA_PIN, SCL_PIN);
-  shtOk = sht31.begin(0x44);
-  Serial.println(shtOk ? "✅ SHT3x ok" : "⚠ SHT3x não encontrado");
+  Wire.setTimeOut(50);   // I2C sem sensor não pode segurar o loop
+  // Enche o buffer analógico antes do primeiro diagnóstico
+  for (int i = 0; i < SCOUNT; i++) {
+    analogBufferTDS[i] = analogRead(TDS_PIN);
+    analogBufferPH[i]  = analogRead(PH_PIN);
+    delay(5);
+  }
+#endif
+
+  // Primeiro diagnóstico: mostra no monitor o que foi encontrado
+  lerSensores();
+#if TEM_NIVEL || TEM_PRO
+  Serial.println("------ Sensores ------");
+#endif
+#if TEM_NIVEL
+  Serial.printf("%s %s\n", sNivel.presente ? "✅" : "⚠", sNivel.rotulo);
+#endif
+#if TEM_PRO
+  Serial.printf("%s %s\n", sClima.presente ? "✅" : "⚠", sClima.rotulo);
+  Serial.printf("%s %s\n", sPh.presente    ? "✅" : "⚠", sPh.rotulo);
+  Serial.printf("%s %s\n", sTds.presente   ? "✅" : "⚠", sTds.rotulo);
+  Serial.println("(⚠ = não respondeu ainda; é testado de novo sozinho)");
 #endif
 
   // Retoma o último ciclo (ou o padrão, na primeira vez)
@@ -489,8 +677,9 @@ void setup() {
 
   espClient.setInsecure();   // TODO: setCACert com a raiz do HiveMQ (ver README)
   mqttClient.setServer(MQTT_HOST, MQTT_PORT);
-  mqttClient.setBufferSize(768);
+  mqttClient.setBufferSize(1024);
   mqttClient.setKeepAlive(30);
+  mqttClient.setSocketTimeout(MQTT_TIMEOUT_S);
   mqttClient.setCallback(mqttCallback);
 }
 
@@ -500,6 +689,7 @@ void setup() {
 void loop() {
   wm.process();               // portal de configuração, se estiver aberto
   verificarBotaoResetWiFi();
+  manterWiFi();
   manterMQTT();
   mqttClient.loop();
 
@@ -512,16 +702,13 @@ void loop() {
   static unsigned long ultimaPublicacao = 0;
   if (millis() - ultimaPublicacao >= PUBLISH_INTERVAL_MS) {
     ultimaPublicacao = millis();
-#if TEM_PRO
-    lerSHT3x();
-    calcularPhTds();
-#endif
-#if TEM_NIVEL
-    lerTanque();
-#endif
+    lerSensores();
     if (mqttClient.connected()) {
+      if (infoPendente) publishInfo();
       publishSensores();
       publishMotorStatus();
+    } else {
+      imprimirLeiturasOffline();
     }
   }
 }
