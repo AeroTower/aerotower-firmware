@@ -54,11 +54,23 @@ aerotower/<id>/info            {"firmware","kit","sensores":[...],"ip","rssi"}, 
 `simulador/simulador_torres.py` publica como uma ou mais torres, com os
 mesmos tópicos e payloads do firmware, e obedece aos comandos da bomba.
 
+**No seu computador** (não gasta nada; precisa só de Python 3):
+
 ```bash
-pip install paho-mqtt
-export MQTT_USER=... MQTT_PASS=...
+pip install -r simulador/requirements.txt
+export MQTT_USER='...'          # sem espaço em volta do =
+export MQTT_PASS='...'
 python simulador/simulador_torres.py --torre AT-5130AA000001:pro --torre AT-5130AA000002:basico
 ```
+
+No Windows (PowerShell), troque os `export` por `$env:MQTT_USER='...'` e
+`$env:MQTT_PASS='...'`.
+
+**No Codespaces**: o `.devcontainer` usa uma imagem Python enxuta (alguns GB,
+em vez dos ~11 GB da imagem padrão) e já instala as dependências. Cadastre
+`MQTT_USER` e `MQTT_PASS` em *Settings → Codespaces → Secrets* para não
+precisar do `export`. Apague o Codespace quando terminar: parado, ele
+continua ocupando a cota gratuita de armazenamento.
 
 Para a torre aparecer no app, cadastre o id antes com o script de fábrica
 (`--torre-id AT-5130AA000001 --kit pro`) e vincule pelo app.

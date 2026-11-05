@@ -1,2 +1,4 @@
 segredos.h
 build/
+__pycache__/
+*.pyc
