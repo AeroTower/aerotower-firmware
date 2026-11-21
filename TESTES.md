@@ -24,7 +24,7 @@ O `simulador/simulador_torres.py` faz o papel do ESP32: mesmos tópicos, mesmos 
 
 ## Firmware (C++)
 
-O `.ino` roda no ESP32 e depende do hardware (Wi-Fi, relé, sensores), então não entra na cobertura automática. Ele é testado na placa, com o monitor serial e o app:
+O `.ino` roda no ESP32 e depende do hardware (Wi-Fi, relé, sensores), então não entra na cobertura automática. O roteiro abaixo é para executar na placa, com o monitor serial e o app, quando houver um ESP32 disponível. Ele **não faz parte** dos 6 testes obrigatórios do Fernão, que vêm do Backend; o comportamento esperado do firmware já está coberto pelos testes do simulador.
 
 | ID | Cenário | Esperado |
 |---|---|---|
