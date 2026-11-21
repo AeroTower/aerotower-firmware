@@ -82,11 +82,28 @@ class TorreSimulada:
         cliente.subscribe(f"{self.base}/motor/comando", qos=1)
         self._status_motor()
 
+    @staticmethod
+    def _minutos(valor, padrao):
+        """Como o firmware: valor que nao e numero inteiro vira o padrao."""
+        if isinstance(valor, int) and not isinstance(valor, bool) and 1 <= valor <= 1440:
+            return valor
+        return padrao
+
     def _comando(self, cliente, userdata, msg):
-        dados = json.loads(msg.payload or b"{}")
+        # Igual ao ESP32: comando malformado e ignorado. Sem isso, a excecao
+        # derrubava a thread do MQTT e a torre parava de responder.
+        try:
+            dados = json.loads(msg.payload or b"{}")
+        except (ValueError, UnicodeDecodeError):
+            print(f"[{self.id}] comando com JSON invalido ignorado")
+            return
+        if not isinstance(dados, dict):
+            print(f"[{self.id}] comando ignorado: nao e um objeto JSON")
+            return
         print(f"[{self.id}] comando {dados}")
         if dados.get("acao") == "ciclo":
-            self.lig, self.des = dados.get("minutos_ligado", 15), dados.get("minutos_desligado", 45)
+            self.lig = self._minutos(dados.get("minutos_ligado"), 15)
+            self.des = self._minutos(dados.get("minutos_desligado"), 45)
             self.ciclo, self.motor, self.mudou = True, True, time.time()
         elif dados.get("acao") == "desligar":
             self.ciclo, self.motor = False, False
