@@ -1,2 +1,13 @@
-segredos.h
-build/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Testes (gerados a cada execucao; as evidencias ficam no Actions)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+relatorio-testes.xml
+.pytest_cache/
