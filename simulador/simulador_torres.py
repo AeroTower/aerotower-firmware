@@ -120,34 +120,70 @@ class TorreSimulada:
         valor += (alvo - valor) * 0.05 + random.uniform(-ruido, ruido)
         return max(minimo, min(maximo, valor))
 
+    def _alternar_motor_se_venceu(self):
+        """Ciclo automatico: troca ligado/desligado quando o tempo da fase acaba."""
+        duracao = (self.lig if self.motor else self.des) * 60
+        if self.ciclo and time.time() - self.mudou > duracao:
+            self.motor, self.mudou = not self.motor, time.time()
+            self._status_motor()
+
+    # Um metodo por sensor: cada um atualiza o proprio valor e devolve os
+    # campos que manda. Sensor novo = metodo novo + entrada em _LEITORES.
+    def _ler_nivel(self):
+        self.nivel -= 0.6 if self.motor else 0.1
+        if self.nivel < 20:
+            self.nivel = 95.0   # "reabasteceu"
+        return {"nivelAgua": round(self.nivel, 1), "tanque_litros": round(self.nivel / 5, 2),
+                "tanque_status": "baixo" if self.nivel < 35 else "ok"}
+
+    def _ler_ph(self):
+        self.ph = self._passo(self.ph, 6.0, 0.05, 4.5, 8.0)
+        return {"ph": round(self.ph, 2)}
+
+    def _ler_tds(self):
+        self.tds = self._passo(self.tds, 700, 15, 100, 1500)
+        return {"tds": round(self.tds), "ec": round(self.tds / 500, 2)}
+
+    def _ler_clima(self):
+        self.temp = self._passo(self.temp, 24, 0.2, 15, 35)
+        self.umid = self._passo(self.umid, 60, 1, 30, 95)
+        return {"temperaturaAmbiente": round(self.temp, 1), "umidadeRelativa": round(self.umid)}
+
+    _LEITORES = {"nivel": _ler_nivel, "ph": _ler_ph, "tds": _ler_tds, "clima": _ler_clima}
+
+    def leitura(self) -> dict:
+        """Monta a mensagem de sensores so com os sensores do kit."""
+        dados = {"motor": self.motor, "ciclo_ativo": self.ciclo}
+        for sensor in SENSORES_POR_KIT[self.kit]:
+            dados.update(self._LEITORES[sensor](self))
+        return dados
+
     def publicar(self):
         if not self.conectada:
             print(f"[{self.id}] sem conexao com o broker: nada foi enviado")
             return
-        if self.ciclo and time.time() - self.mudou > (self.lig if self.motor else self.des) * 60:
-            self.motor, self.mudou = not self.motor, time.time()
-            self._status_motor()
-
-        dados = {"motor": self.motor, "ciclo_ativo": self.ciclo}
-        sensores = SENSORES_POR_KIT[self.kit]
-        if "nivel" in sensores:
-            self.nivel -= 0.6 if self.motor else 0.1
-            if self.nivel < 20:
-                self.nivel = 95.0   # "reabasteceu"
-            dados.update(nivelAgua=round(self.nivel, 1), tanque_litros=round(self.nivel / 5, 2),
-                         tanque_status="baixo" if self.nivel < 35 else "ok")
-        if "ph" in sensores:
-            self.ph = self._passo(self.ph, 6.0, 0.05, 4.5, 8.0)
-            dados["ph"] = round(self.ph, 2)
-        if "tds" in sensores:
-            self.tds = self._passo(self.tds, 700, 15, 100, 1500)
-            dados.update(tds=round(self.tds), ec=round(self.tds / 500, 2))
-        if "clima" in sensores:
-            self.temp = self._passo(self.temp, 24, 0.2, 15, 35)
-            self.umid = self._passo(self.umid, 60, 1, 30, 95)
-            dados.update(temperaturaAmbiente=round(self.temp, 1), umidadeRelativa=round(self.umid))
+        self._alternar_motor_se_venceu()
+        dados = self.leitura()
         self.cliente.publish(f"{self.base}/sensores", json.dumps(dados))
         print(f"[{self.id}] {dados}")
+
+def criar_torre(item: str) -> TorreSimulada:
+    """"AT-XXXX:kit" -> TorreSimulada. Sai com mensagem clara se for invalido."""
+    torre_id, _, kit = item.partition(":")
+    torre_id, kit = torre_id.strip().upper(), (kit or "pro").strip().lower()
+    if not ID_VALIDO.match(torre_id):
+        sys.exit(f"Id invalido: {torre_id!r}. Use AT- seguido de 4 a 16 letras/numeros "
+                 "(ex.: AT-DEMO0001); o Backend ignora qualquer outro formato.")
+    if kit not in SENSORES_POR_KIT:
+        sys.exit(f"Kit invalido: {kit!r}. Use: {', '.join(SENSORES_POR_KIT)} (sem acento).")
+    return TorreSimulada(torre_id, kit)
+
+
+def encerrar(torres):
+    for torre in torres:
+        torre.cliente.publish(f"{torre.base}/status", json.dumps({"status": "offline"}), retain=True)
+        torre.cliente.loop_stop()
+        torre.cliente.disconnect()
 
 
 def main():
@@ -157,16 +193,7 @@ def main():
     parser.add_argument("--intervalo", type=float, default=5.0)
     args = parser.parse_args()
 
-    torres = []
-    for item in args.torre:
-        torre_id, _, kit = item.partition(":")
-        torre_id, kit = torre_id.strip().upper(), (kit or "pro").strip().lower()
-        if not ID_VALIDO.match(torre_id):
-            sys.exit(f"Id invalido: {torre_id!r}. Use AT- seguido de 4 a 16 letras/numeros "
-                     "(ex.: AT-DEMO0001); o Backend ignora qualquer outro formato.")
-        if kit not in SENSORES_POR_KIT:
-            sys.exit(f"Kit invalido: {kit!r}. Use: {', '.join(SENSORES_POR_KIT)} (sem acento).")
-        torres.append(TorreSimulada(torre_id, kit))
+    torres = [criar_torre(item) for item in args.torre]
     for torre in torres:
         torre.iniciar()
 
@@ -176,11 +203,7 @@ def main():
             for torre in torres:
                 torre.publicar()
     except KeyboardInterrupt:
-        for torre in torres:
-            torre.cliente.publish(f"{torre.base}/status", json.dumps({"status": "offline"}), retain=True)
-            torre.cliente.loop_stop()
-            torre.cliente.disconnect()
-
+        encerrar(torres)
 
 if __name__ == "__main__":
     main()

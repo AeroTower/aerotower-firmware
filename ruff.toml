@@ -1,0 +1,11 @@
+# Analise estatica do simulador (o firmware C++ fica de fora).
+# Rodar: ruff check .
+line-length = 120
+target-version = "py311"
+include = ["simulador/**/*.py"]
+
+[lint]
+select = ["E", "F", "W", "B", "SIM", "C90"]
+
+[lint.mccabe]
+max-complexity = 10
