@@ -1,3 +1,7 @@
+# Firmware: senhas do Wi-Fi/MQTT ficam fora do Git
+segredos.h
+build/
+
 # Python
 __pycache__/
 *.py[cod]
