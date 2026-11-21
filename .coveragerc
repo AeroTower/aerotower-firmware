@@ -1,0 +1,11 @@
+# Cobertura do simulador (Python). O firmware em C++ roda no ESP32 e e
+# testado na placa (ver TESTES.md).
+[run]
+source = simulador
+omit =
+    simulador/tests/*
+
+[report]
+show_missing = true
+skip_empty = true
+fail_under = 90
