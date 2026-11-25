@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from conftest import ClienteFalso, Mensagem
+from conftest import Mensagem
 
 
 def test_cria_cliente_com_tls_senha_e_aviso_de_queda(sim, monkeypatch):
@@ -124,3 +124,16 @@ def test_sem_conexao_nada_e_enviado(sim, capsys):
     t = sim.TorreSimulada("AT-SIMTESTE01", "pro")
     t.publicar()
     assert t.cliente.publicados == [] and "sem conexao" in capsys.readouterr().out
+
+
+def test_leitura_monta_os_campos_na_ordem_dos_sensores_do_kit(sim):
+    # Depois da refatoracao cada sensor tem o seu metodo; a mensagem continua igual.
+    dados = sim.TorreSimulada("AT-SIMTESTE01", "pro").leitura()
+    assert list(dados) == ["motor", "ciclo_ativo", "nivelAgua", "tanque_litros", "tanque_status",
+                           "ph", "tds", "ec", "temperaturaAmbiente", "umidadeRelativa"]
+    assert sim.TorreSimulada("AT-SIMTESTE01", "basico").leitura() == {"motor": True, "ciclo_ativo": True}
+
+
+def test_todo_sensor_de_kit_tem_um_leitor(sim):
+    for sensores in sim.SENSORES_POR_KIT.values():
+        assert set(sensores) <= set(sim.TorreSimulada._LEITORES)

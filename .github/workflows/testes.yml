@@ -23,6 +23,9 @@ jobs:
       - name: Dependencias
         run: pip install -r simulador/requirements.txt -r requirements-dev.txt
 
+      - name: Analise estatica (ruff)
+        run: ruff check --output-format=github .
+
       # Inclui um broker MQTT local (amqtt): nao usa o HiveMQ nem precisa de senha.
       - name: Testes e cobertura
         run: >
